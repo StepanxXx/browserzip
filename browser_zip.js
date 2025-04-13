@@ -5,20 +5,34 @@ class BrowserZip {
 
   async addFile(name, content) {
     const utf8Encoder = new TextEncoder(); // Кодування назв файлів у форматі UTF-8
-    const encodedName = utf8Encoder.encode(name); // Назва файлу коректно закодована в UTF-8
-    const encodedContent = typeof content === "string"
-      ? utf8Encoder.encode(content)
-      : content;
-
+    const encodedName = utf8Encoder.encode(name);
+  
+    let encodedContent;
+    if (content instanceof Blob) {
+      // Якщо це Blob, зчитуємо його як ArrayBuffer
+      const arrayBuffer = await content.arrayBuffer();
+      encodedContent = new Uint8Array(arrayBuffer);
+    } else if (typeof content === "string") {
+      // Якщо це рядок
+      encodedContent = utf8Encoder.encode(content);
+    } else if (content instanceof Uint8Array) {
+      // Якщо це вже Uint8Array
+      encodedContent = content;
+    } else {
+      throw new Error("Unsupported content type. Must be Blob, string, or Uint8Array.");
+    }
+  
     if (this.files.has(name)) {
       console.warn(`Файл "${name}" вже доданий до архіву. Пропускаємо...`);
       return; // Пропускаємо, якщо файл вже є
     }
-
+  
     const crc32 = this.calculateCRC32(encodedContent);
     const fileHeader = this.createFileHeader(encodedName, encodedContent, crc32);
     this.files.set(name, { header: fileHeader, content: encodedContent, crc32 });
   }
+  
+
 
   calculateCRC32(data) {
     const table = new Array(256).fill(0).map((_, i) => {

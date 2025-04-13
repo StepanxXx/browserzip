@@ -19,7 +19,7 @@ zipButton.addEventListener("click", async () => {
 
 
   // Генеруємо ZIP-архів
-  zip.downloadZip("archive.zip");
+  zip.downloadZipStream("archive.zip");
 
   // Показуємо статус успішного завершення
   appendAlert('Архів створено та завантажено успішно!', 'success')
@@ -39,7 +39,7 @@ const appendAlert = (message, type) => {
   mainContainer.append(wrapper)
 }
 
-/*test
+/*
 {
   const zip = new BrowserZip();
 
@@ -48,7 +48,7 @@ const appendAlert = (message, type) => {
     const blob = new Blob(["Це вміст BLOB-файлу"], { type: "text/plain" });
     await zip.addFile("blobFile.txt", blob);
 
-    zip.downloadZip("myArchive.zip");
+    zip.downloadZipStream("myArchive.zip");
   }
 
   createZip();
