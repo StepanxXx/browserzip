@@ -19,7 +19,8 @@ zipButton.addEventListener("click", async () => {
 
 
   // Генеруємо ZIP-архів
-  zip.downloadZip("archive.zip");
+  await zip.downloadZip("archive.zip");
+  zip.terminate();
 
   // Показуємо статус успішного завершення
   appendAlert('Архів створено та завантажено успішно!', 'success')
