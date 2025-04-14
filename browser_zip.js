@@ -85,9 +85,9 @@ class WorkerPool {
 
   /**
    * Запускає обчислення CRC32 для Blob з потоковою обробкою по чанках.
-   * @param {Blob} blob – Оброблюваний файл
-   * @param {number} chunkSize – Розмір чанку (у байтах)
-   * @returns {Promise<number>} – Обчислене значення CRC32
+   * @param {Blob} blob – оброблюваний файл
+   * @param {number} chunkSize – розмір чанку (у байтах)
+   * @returns {Promise<number>} – обчислене значення CRC32
    */
   runCRC32Stream(blob, chunkSize) {
     return new Promise((resolve, reject) => {
@@ -110,9 +110,7 @@ class WorkerPool {
 }
 
 /**
- * Клас BrowserZip – бібліотека для формування ZIP‑архіву.
- * Генеруються локальні заголовки, вміст файлів, запис центрального каталогу та EOCD.
- * Використовується WorkerPool для потокового обчислення CRC32 для великих файлів (Blob).
+ * Клас BrowserZip – бібліотека для формування ZIP‑архівів із підтримкою Zip64 та створенням директорій.
  */
 class BrowserZip {
   constructor() {
@@ -124,7 +122,6 @@ class BrowserZip {
 
   /**
    * Синхронно обчислює CRC32 для даних (Uint8Array).
-   * Використовує статичну таблицю, що ініціалізується один раз.
    */
   static computeCRC32(data) {
     const table = BrowserZip.crc32Table || (BrowserZip.crc32Table = new Array(256)
@@ -145,7 +142,7 @@ class BrowserZip {
 
   /**
    * Додає файл до архіву.
-   * @param {string} name – Ім'я файлу.
+   * @param {string} name – Ім'я файлу (включаючи шлях, наприклад, "folder/file.txt").
    * @param {Blob|string|Uint8Array} content – Вміст файлу.
    */
   async addFile(name, content) {
@@ -159,7 +156,6 @@ class BrowserZip {
     let crc32 = null;
     
     if (content instanceof Blob) {
-      // Для великих файлів зберігаємо об’єкт Blob – відстрочене завантаження даних.
       storedContent = content;
     } else if (typeof content === "string") {
       storedContent = utf8Encoder.encode(content);
@@ -171,129 +167,265 @@ class BrowserZip {
       throw new Error("Unsupported content type. Must be Blob, string, or Uint8Array.");
     }
     
-    // Запис файлу для подальшої генерації архіву.
     const fileRecord = {
       name,
       encodedName,           // Uint8Array із закодованою назвою
       content: storedContent, // Blob або Uint8Array
       crc32,                 // Для Blob буде обчислено під час генерації
       size: 0,               // Розмір файлу визначається під час генерації
+      isDirectory: false
     };
 
     this.files.set(name, fileRecord);
   }
 
-  // Створює локальний заголовок файлу у форматі ZIP.
-  createLocalFileHeader(encodedName, fileSize, crc32) {
-    const header = new Uint8Array(30 + encodedName.length);
-    const view = new DataView(header.buffer);
-    view.setUint32(0, 0x04034b50, true);    // Signature локального заголовку
-    view.setUint16(4, 0x0014, true);         // Версія, необхідна для розархівації
-    view.setUint16(6, 0x0800, true);         // Загальний прапорець (UTF-8)
-    view.setUint16(8, 0x0000, true);         // Метод стиснення (0 = Store)
-    view.setUint32(10, 0x00000000, true);    // Часова мітка
-    view.setUint32(14, crc32, true);         // CRC-32
-    view.setUint32(18, fileSize, true);      // Стиснутий розмір
-    view.setUint32(22, fileSize, true);      // Нестиснутий розмір
-    view.setUint16(26, encodedName.length, true); // Довжина імені файлу
-    view.setUint16(28, 0x0000, true);        // Довжина додаткового поля
-    header.set(encodedName, 30);
-    return header;
+  /**
+   * Додає папку до архіву.
+   * @param {string} folderName – Ім'я папки (наприклад, "folder/"). Якщо не закінчується на "/", додається автоматично.
+   */
+  async addFolder(folderName) {
+    if (!folderName.endsWith("/")) {
+      folderName += "/";
+    }
+    if (this.files.has(folderName)) {
+      console.warn(`Папка "${folderName}" вже додана до архіву. Пропускаємо...`);
+      return;
+    }
+    const utf8Encoder = new TextEncoder();
+    const encodedName = utf8Encoder.encode(folderName);
+    // Директорія не має вмісту, розмір = 0, CRC = 0.
+    const fileRecord = {
+      name: folderName,
+      encodedName,
+      content: new Uint8Array(0),
+      crc32: 0,
+      size: 0,
+      isDirectory: true
+    };
+    this.files.set(folderName, fileRecord);
   }
 
-  // Створює запис центрального каталогу для файлу.
-  createCentralDirectoryHeader(fileRecord, localHeaderOffset) {
-    const encodedName = fileRecord.encodedName;
-    const header = new Uint8Array(46 + encodedName.length);
+  /**
+   * Створює локальний заголовок файлу у форматі ZIP з підтримкою Zip64.
+   * Якщо fileSize перевищує 0xFFFFFFFF, у поля розміру запису записуємо 0xFFFFFFFF,
+   * а фактичний розмір додаємо у Zip64 extra field.
+   * @param {Uint8Array} encodedName – закодоване ім'я файлу.
+   * @param {number} fileSize – розмір файлу.
+   * @param {number} crc32 – обчислений CRC32.
+   * @returns {Uint8Array} – локальний заголовок файлу.
+   */
+  createLocalFileHeader(encodedName, fileSize, crc32) {
+    const useZip64 = fileSize >= 0xFFFFFFFF;
+    const extraFieldSize = useZip64 ? 20 : 0;
+    const headerSize = 30 + encodedName.length + extraFieldSize;
+    const header = new Uint8Array(headerSize);
     const view = new DataView(header.buffer);
-    view.setUint32(0, 0x02014b50, true); // Signature центрального каталогу
-    view.setUint16(4, 0x0014, true);      // Версія створення
-    view.setUint16(6, 0x0014, true);      // Версія, необхідна для розархівації
-    view.setUint16(8, 0x0800, true);       // Загальний прапорець (UTF-8)
-    view.setUint16(10, 0x0000, true);      // Метод стиснення
-    view.setUint32(12, 0x00000000, true);  // Часова мітка
-    view.setUint32(16, fileRecord.crc32, true); // CRC-32
-    view.setUint32(20, fileRecord.size, true);  // Стиснутий розмір
-    view.setUint32(24, fileRecord.size, true);  // Нестиснутий розмір
-    view.setUint16(28, encodedName.length, true); // Довжина імені файлу
-    view.setUint16(30, 0x0000, true);      // Довжина додаткового поля
-    view.setUint16(32, 0x0000, true);      // Довжина коментаря
-    view.setUint16(34, 0x0000, true);      // Номер диска
-    view.setUint16(36, 0x0000, true);      // Внутрішні атрибути
-    view.setUint32(38, 0x00000000, true);  // Зовнішні атрибути
-    view.setUint32(42, localHeaderOffset, true); // Зміщення локального заголовку
-    header.set(encodedName, 46);
+  
+    view.setUint32(0, 0x04034b50, true);         // Signature локального заголовку
+    view.setUint16(4, useZip64 ? 0x002D : 0x0014, true); // Версія для розархівації (45 для Zip64)
+    view.setUint16(6, 0x0800, true);              // Загальний прапорець (UTF-8)
+    view.setUint16(8, 0x0000, true);              // Метод стиснення (0 = Store)
+    view.setUint32(10, 0x00000000, true);         // Часова мітка
+    view.setUint32(14, crc32, true);              // CRC-32
+    const sizeField = useZip64 ? 0xFFFFFFFF : fileSize;
+    view.setUint32(18, sizeField, true);          // Стиснутий розмір
+    view.setUint32(22, sizeField, true);          // Нестиснутий розмір
+    view.setUint16(26, encodedName.length, true); // Довжина імені файлу
+    view.setUint16(28, extraFieldSize, true);     // Довжина додаткового поля
+    header.set(encodedName, 30);
+  
+    if (useZip64) {
+      let pos = 30 + encodedName.length;
+      // Запис Zip64 extra field: ID (0x0001), довжина (16 байт),
+      // 64-бітний нестиснутий розмір, 64-бітний стиснутий розмір.
+      view.setUint16(pos, 0x0001, true); pos += 2;
+      view.setUint16(pos, 16, true); pos += 2;
+      view.setBigUint64(pos, BigInt(fileSize), true); pos += 8;
+      view.setBigUint64(pos, BigInt(fileSize), true); pos += 8;
+    }
     return header;
   }
 
   /**
+   * Створює запис центрального каталогу для файлу з підтримкою Zip64.
+   * Для директорій зовнішній атрибут встановлюється так, щоб відзначати об'єкт як папку (наприклад, 0x10 << 16).
+   * @param {Object} fileRecord – запис файлу із всіма даними.
+   * @param {number} localHeaderOffset – зміщення локального заголовку.
+   * @returns {Uint8Array} – запис центрального каталогу.
+   */
+  createCentralDirectoryHeader(fileRecord, localHeaderOffset) {
+    const encodedName = fileRecord.encodedName;
+    const useZip64 = fileRecord.size >= 0xFFFFFFFF;
+    const extraFieldSize = useZip64 ? 20 : 0;
+    const headerSize = 46 + encodedName.length + extraFieldSize;
+    const header = new Uint8Array(headerSize);
+    const view = new DataView(header.buffer);
+  
+    view.setUint32(0, 0x02014b50, true);         // Signature запису центрального каталогу
+    view.setUint16(4, useZip64 ? 0x002D : 0x0014, true); // Версія створення
+    view.setUint16(6, useZip64 ? 0x002D : 0x0014, true); // Версія для розархівації
+    view.setUint16(8, 0x0800, true);              // Загальний прапорець (UTF-8)
+    view.setUint16(10, 0x0000, true);             // Метод стиснення
+    view.setUint32(12, 0x00000000, true);         // Часова мітка
+    view.setUint32(16, fileRecord.crc32, true);   // CRC-32
+    const sizeField = useZip64 ? 0xFFFFFFFF : fileRecord.size;
+    view.setUint32(20, sizeField, true);          // Стиснутий розмір
+    view.setUint32(24, sizeField, true);          // Нестиснутий розмір
+    view.setUint16(28, encodedName.length, true); // Довжина імені файлу
+    view.setUint16(30, extraFieldSize, true);     // Довжина додаткового поля
+    view.setUint16(32, 0x0000, true);             // Довжина коментаря
+    view.setUint16(34, 0x0000, true);             // Номер диска
+    view.setUint16(36, 0x0000, true);             // Внутрішні атрибути
+    // Якщо це директорія, встановлюємо зовнішні атрибути, що позначають її як папку (MS-DOS: 0x10)
+    view.setUint32(38, fileRecord.isDirectory ? (0x10 << 16) : 0x00000000, true);
+    const offsetField = useZip64 ? 0xFFFFFFFF : localHeaderOffset;
+    view.setUint32(42, offsetField, true);        // Зміщення локального заголовку
+    header.set(encodedName, 46);
+  
+    if (useZip64) {
+      let pos = 46 + encodedName.length;
+      view.setUint16(pos, 0x0001, true); pos += 2;
+      view.setUint16(pos, 16, true); pos += 2;
+      view.setBigUint64(pos, BigInt(fileRecord.size), true); pos += 8;
+      view.setBigUint64(pos, BigInt(fileRecord.size), true); pos += 8;
+    }
+    return header;
+  }
+
+  /**
+   * Створює кінцеві записи архіву.
+   * Якщо характеристики (зміщення, розмір каталогу, кількість записів) перевищують ліміти ZIP,
+   * генерується Zip64 EOCD Record, Zip64 EOCD Locator та стандартний EOCD Record з максимальними значеннями.
+   * @param {number} centralDirectoryOffset – Зміщення центрального каталогу.
+   * @param {number} centralDirectorySize – Розмір центрального каталогу.
+   * @param {number} totalEntries – Загальна кількість записів.
+   * @returns {Array<Uint8Array>} – Масив, що містить кінцеві записи.
+   */
+  createEndRecords(centralDirectoryOffset, centralDirectorySize, totalEntries) {
+    const useZip64 = (centralDirectoryOffset >= 0xFFFFFFFF ||
+                      centralDirectorySize >= 0xFFFFFFFF ||
+                      totalEntries >= 0xFFFF);
+    if (useZip64) {
+      // Zip64 End of Central Directory Record (56 байт)
+      const zip64End = new Uint8Array(56);
+      const viewZip64 = new DataView(zip64End.buffer);
+      viewZip64.setUint32(0, 0x06064b50, true);            // Сигнатура Zip64 EOCD Record
+      viewZip64.setBigUint64(4, 44n, true);                  // Розмір запису (44 байти, що слідують)
+      viewZip64.setUint16(12, 0x002D, true);                 // Версія створення (45)
+      viewZip64.setUint16(14, 0x002D, true);                 // Версія, необхідна для розархівації (45)
+      viewZip64.setUint32(16, 0, true);                      // Номер цього диска
+      viewZip64.setUint32(20, 0, true);                      // Диск, на якому починається каталог
+      viewZip64.setBigUint64(24, BigInt(totalEntries), true); // Кількість записів на цьому диску
+      viewZip64.setBigUint64(32, BigInt(totalEntries), true); // Загальна кількість записів
+      viewZip64.setBigUint64(40, BigInt(centralDirectorySize), true); // Розмір центрального каталогу
+      viewZip64.setBigUint64(48, BigInt(centralDirectoryOffset), true); // Зміщення центрального каталогу
+
+      // Zip64 End of Central Directory Locator (20 байт)
+      const zip64Locator = new Uint8Array(20);
+      const viewLocator = new DataView(zip64Locator.buffer);
+      viewLocator.setUint32(0, 0x07064b50, true);          // Сигнатура Zip64 EOCD Locator
+      viewLocator.setUint32(4, 0, true);                     // Номер диска, на якому знаходиться Zip64 EOCD Record
+      viewLocator.setBigUint64(8, BigInt(centralDirectoryOffset + centralDirectorySize), true); // Зміщення Zip64 EOCD Record
+      viewLocator.setUint32(16, 1, true);                    // Кількість дисків
+
+      // Стандартний EOCD Record (22 байти) з максимально можливими значеннями
+      const eocd = new Uint8Array(22);
+      const viewEOCD = new DataView(eocd.buffer);
+      viewEOCD.setUint32(0, 0x06054b50, true);             // Сигнатура EOCD
+      viewEOCD.setUint16(4, 0, true);                      // Номер цього диска
+      viewEOCD.setUint16(6, 0, true);                      // Диск з початком каталогу
+      viewEOCD.setUint16(8, 0xFFFF, true);                 // Кількість записів на цьому диску (максимум)
+      viewEOCD.setUint16(10, 0xFFFF, true);                // Загальна кількість записів (максимум)
+      viewEOCD.setUint32(12, 0xFFFFFFFF, true);            // Розмір каталогу (максимум)
+      viewEOCD.setUint32(16, 0xFFFFFFFF, true);            // Зміщення каталогу (максимум)
+      viewEOCD.setUint16(20, 0, true);                     // Довжина коментаря
+      return [zip64End, zip64Locator, eocd];
+    } else {
+      const eocd = new Uint8Array(22);
+      const viewEOCD = new DataView(eocd.buffer);
+      viewEOCD.setUint32(0, 0x06054b50, true);             // Сигнатура EOCD
+      viewEOCD.setUint16(4, 0, true);                      // Номер цього диска
+      viewEOCD.setUint16(6, 0, true);                      // Диск з початком каталогу
+      viewEOCD.setUint16(8, totalEntries, true);           // Кількість записів на цьому диску
+      viewEOCD.setUint16(10, totalEntries, true);          // Загальна кількість записів
+      viewEOCD.setUint32(12, centralDirectorySize, true);  // Розмір каталогу
+      viewEOCD.setUint32(16, centralDirectoryOffset, true); // Зміщення каталогу
+      viewEOCD.setUint16(20, 0, true);                     // Довжина коментаря
+      return [eocd];
+    }
+  }
+
+  /**
    * Генерує ZIP‑архів як ReadableStream.
-   * Це дозволяє послідовно формувати вихідний потік, не завантажуючи весь архів в пам’ять.
+   * Потік формується шляхом послідовного додавання локальних заголовків, вмісту файлів,
+   * записів центрального каталогу та кінцевих записів (EOCD та Zip64 EOCD, якщо потрібно).
    * @param {number} [chunkSizeForCRC=65536] – Розмір чанку для обчислення CRC32 (у байтах)
-   * @returns {ReadableStream} – потік з даними ZIP‑архіву.
+   * @returns {ReadableStream} – Потік з даними ZIP‑архіву.
    */
   generateZipStream(chunkSizeForCRC = 65536) {
     const self = this;
     const fileRecords = Array.from(this.files.values());
     const centralDirectoryEntries = [];
     let offset = 0;
-
+  
     const stream = new ReadableStream({
       async start(controller) {
         try {
+          // Обробка кожного запису (файлу або директорії)
           for (const fileRecord of fileRecords) {
-            // Визначаємо розмір файлу
-            let fileSize = 0;
-            if (fileRecord.content instanceof Blob) {
-              fileSize = fileRecord.content.size;
-            } else {
-              fileSize = fileRecord.content.length;
-            }
+            // Якщо запис є директорією, розмір завжди 0.
+            let fileSize = fileRecord.isDirectory
+              ? 0
+              : (fileRecord.content instanceof Blob
+                  ? fileRecord.content.size
+                  : fileRecord.content.length);
             fileRecord.size = fileSize;
-
+  
             // Обчислення CRC32:
-            // • Для Blob – обчислюємо потоково через worker pool.
-            // • Для інших типів – значення вже обчислено.
-            if (fileRecord.content instanceof Blob) {
+            // – Для Blob (файлів) – потокове обчислення через WorkerPool.
+            // – Для директорій або інших типів – значення вже обчислено або 0.
+            if (!fileRecord.isDirectory && (fileRecord.content instanceof Blob)) {
               fileRecord.crc32 = await self.workerPool.runCRC32Stream(fileRecord.content, chunkSizeForCRC);
             }
-
-            // Створюємо локальний заголовок файлу
+  
+            // Створення локального заголовку
             const localHeader = self.createLocalFileHeader(
               fileRecord.encodedName,
               fileSize,
-              fileRecord.crc32
+              fileRecord.crc32 || 0
             );
             controller.enqueue(localHeader);
             offset += localHeader.byteLength;
-
-            // Потокове зчитування вмісту файлу з обробкою помилок
-            if (fileRecord.content instanceof Blob) {
-              const reader = fileRecord.content.stream().getReader();
-              while (true) {
-                let result;
-                try {
-                  result = await reader.read();
-                } catch (err) {
-                  controller.error(new Error("Помилка зчитування файлу: " + err));
-                  return;
+  
+            // Для файлів з даними – потокове зчитування вмісту.
+            if (!fileRecord.isDirectory) {
+              if (fileRecord.content instanceof Blob) {
+                const reader = fileRecord.content.stream().getReader();
+                while (true) {
+                  let result;
+                  try {
+                    result = await reader.read();
+                  } catch (err) {
+                    controller.error(new Error("Помилка зчитування файлу: " + err));
+                    return;
+                  }
+                  if (result.done) break;
+                  controller.enqueue(result.value);
+                  offset += result.value.byteLength;
                 }
-                if (result.done) break;
-                controller.enqueue(result.value);
-                offset += result.value.byteLength;
+              } else {
+                controller.enqueue(fileRecord.content);
+                offset += fileRecord.content.byteLength || fileRecord.content.length;
               }
-            } else {
-              controller.enqueue(fileRecord.content);
-              offset += fileRecord.content.byteLength || fileRecord.content.length;
             }
-
-            // Розраховуємо зміщення для запису у центральному каталозі
+  
+            // Розрахунок зміщення для запису у центральному каталозі
             const localHeaderOffset = offset - (localHeader.byteLength + fileRecord.size);
             const centralHeader = self.createCentralDirectoryHeader(fileRecord, localHeaderOffset);
             centralDirectoryEntries.push(centralHeader);
           }
-
-          // Додаємо записи центрального каталогу
+  
+          // Додавання записів центрального каталогу
           let centralDirSize = 0;
           for (const entry of centralDirectoryEntries) {
             controller.enqueue(entry);
@@ -301,22 +433,15 @@ class BrowserZip {
           }
           const centralDirOffset = offset;
           offset += centralDirSize;
-
-          // Створюємо кінцевий запис центрального каталозію (EOCD)
-          const endRecord = new Uint8Array(22);
-          const view = new DataView(endRecord.buffer);
-          view.setUint32(0, 0x06054b50, true); // Підпис EOCD
-          view.setUint16(4, 0, true);          // Номер диска
-          view.setUint16(6, 0, true);          // Диск з початком центрального каталогу
-          view.setUint16(8, fileRecords.length, true);  // Загальна кількість записів
-          view.setUint16(10, fileRecords.length, true); // Загальна кількість записів
-          view.setUint32(12, centralDirSize, true);     // Розмір центрального каталогу
-          view.setUint32(16, centralDirOffset, true);     // Зміщення центрального каталогу
-          view.setUint16(20, 0, true);         // Довжина коментаря
-          controller.enqueue(endRecord);
-          offset += endRecord.byteLength;
-
-          // Очищення пам’яті: звільняємо посилання на файли
+  
+          // Створення кінцевих записів
+          const endRecords = self.createEndRecords(centralDirOffset, centralDirSize, fileRecords.length);
+          for (const rec of endRecords) {
+            controller.enqueue(rec);
+          }
+          offset += endRecords.reduce((sum, rec) => sum + rec.byteLength, 0);
+  
+          // Очищення пам’яті: звільняємо записи
           self.files.clear();
           controller.close();
         } catch (error) {
@@ -326,12 +451,13 @@ class BrowserZip {
     });
     return stream;
   }
-
+  
   /**
    * Завантажує ZIP‑архів.
-   * Архів генерується за допомогою стрімового API, після чого створюється посилання для завантаження.
+   * Генерується архів через ReadableStream, створюється Blob, генерується URL,
+   * а потім симулюється клік для завантаження.
    * @param {string} fileName – Ім'я вихідного ZIP‑файлу.
-   * @param {number} [chunkSizeForCRC=65536] – Розмір чанку для обчислення CRC32 (у байтах)
+   * @param {number} [chunkSizeForCRC=65536] – Розмір чанку для обчислення CRC32.
    */
   async downloadZip(fileName, chunkSizeForCRC = 65536) {
     const zipStream = this.generateZipStream(chunkSizeForCRC);
@@ -342,10 +468,9 @@ class BrowserZip {
     link.href = url;
     link.download = fileName;
     link.click();
-    // Звільняємо URL після використання
     URL.revokeObjectURL(url);
   }
-
+  
   /**
    * Завершує роботу бібліотеки та звільняє ресурси (воркери).
    */
@@ -358,13 +483,14 @@ class BrowserZip {
 //
 // (async () => {
 //   const zip = new BrowserZip();
-//   // Додаємо невеликий текстовий файл
+//   // Додаємо файл у корінь архіву
 //   await zip.addFile("example.txt", "Це приклад вмісту.");
-//   // Додаємо великий файл як Blob (наприклад, отриманий з file input)
-//   // await zip.addFile("bigFile.bin", someLargeBlob);
-//
+//   // Створюємо папку (директорію)
+//   await zip.addFolder("folder/");
+//   // Додаємо файл у створену папку
+//   await zip.addFile("folder/info.txt", "Інформація у папці.");
 //   // Завантаження архіву
 //   await zip.downloadZip("archive.zip");
-//   // Звільнюємо ресурси
+//   // Звільняємо ресурси
 //   zip.terminate();
 // })();
