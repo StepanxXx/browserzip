@@ -15,6 +15,9 @@
   <div class="container py-5" id="mainContainer">
     <h1>Архівування файлів без стисненням</h1>
     <input type="file" id="fileInput" class="form-control my-3" multiple title="Додати файли"/>
+    <div class="progress my-3 invisible" id="progressContainer">
+      <div class="progress-bar" id="progressBar" role="progressbar" aria-label="Progress" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+    </div>
     <button id="zipButton" class="btn btn-primary">Створити ZIP</button>
   </div>
 </body>

@@ -2,29 +2,45 @@
 const fileInput = document.getElementById("fileInput");
 const zipButton = document.getElementById("zipButton");
 const mainContainer = document.getElementById('mainContainer');
-
+const progressContainer = document.getElementById("progressContainer");
+const progressBar = document.getElementById("progressBar");
 
 zipButton.addEventListener("click", async () => {
   const zip = new BrowserZip();
 
   const files = fileInput.files;
   if (files.length === 0) {
-    appendAlert("Будь ласка, виберіть файли для архівування!", 'danger')
+    appendAlert("Будь ласка, виберіть файли для архівування!", 'danger');
     return;
   }
 
+  // Показуємо прогрес-бар
+  progressContainer.classList.remove("invisible");
+  progressBar.style.width = "0%";
+  progressBar.setAttribute("aria-valuenow", "0");
+  progressBar.textContent = "0%";
+
   // Додаємо файли до архіву
-  for (const file of files)
+  for (const file of files) {
     await zip.addFile(file.name, file);
+  }
 
+  // Генеруємо ZIP-архів із прогресом
+  await zip.downloadZip("archive.zip", 65536, (progress) => {
+    progressBar.style.width = `${progress}%`;
+    progressBar.setAttribute("aria-valuenow", progress);
+    progressBar.textContent = `${progress}%`;
+  });
 
-  // Генеруємо ZIP-архів
-  await zip.downloadZip("archive.zip");
   zip.terminate();
 
-  // Показуємо статус успішного завершення
+  // Ховаємо прогрес-бар після завершення
+  setTimeout(() => {
+    progressContainer.classList.add("invisible");
+  }, 2000);
+
   appendAlert('Архів створено та завантажено успішно!', 'success')
-});
+});;
 
 
 
