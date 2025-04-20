@@ -54,8 +54,8 @@ await zip.addFile("document.pdf", pdfBlob);
 await zip.addFile("backup.db", dbBlob);
 
 // Генеруємо архів та запускаємо завантаження із прогресом
-await zip.downloadZip("backup.zip", 65536, (progress) => {
-  console.log(`Прогрес: ${progress}%`);
+await zip.downloadZip("backup.zip", 65536, ({overallProgressPercent}) => {
+  console.log(`Прогрес: ${overallProgressPercent}%`);
 });
 
 // Звільняємо ресурси після завершення роботи

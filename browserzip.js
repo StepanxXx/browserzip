@@ -360,17 +360,21 @@ const BrowserZip = (function() {
      * Генерує ZIP‑архів як ReadableStream.
      * Потік формується шляхом послідовного додавання локальних заголовків, вмісту файлів,
      * записів центрального каталогу та кінцевих записів (EOCD та Zip64 EOCD, якщо потрібно).
-     * @param {number} [chunkSizeForCRC=65536] – Розмір чанку для обчислення CRC32 (у байтах)
-     * @param {function} [onProgress=null] – Функція зворотного виклику для оновлення прогресу
+     *
+     * @param {object} [options] - Опції генерації.
+     * @param {number} [options.chunkSizeForCRC=65536] – Розмір чанку для обчислення CRC32 (у байтах)
+     * @param {function} [options.onProgress=null] – Функція зворотного виклику для оновлення прогресу
+     *   (отримує об'єкт: { filename, fileBytesProcessed, fileTotalBytes, overallProgressPercent })
      * @returns {ReadableStream} – Потік з даними ZIP‑архіву.
      */
-    generateZipStream(chunkSizeForCRC = 65536, onProgress = null) {
+    generateZipStream(options = {}) {
+      const { chunkSizeForCRC = 65536, onProgress = null } = options;
       const self = this;
       const fileRecords = Array.from(this.files.values());
       const centralDirectoryEntries = [];
       let offset = 0;
       let totalSize = 0;
-    
+
       // Обчислюємо загальний розмір файлів
       for (const fileRecord of fileRecords) {
         totalSize += fileRecord.isDirectory
@@ -379,12 +383,11 @@ const BrowserZip = (function() {
               ? fileRecord.content.size
               : fileRecord.content.length);
       }
-    
+
       const stream = new ReadableStream({
         async start(controller) {
           try {
             let processedSize = 0;
-            
 
             for (const fileRecord of fileRecords) {
               let fileSize = fileRecord.isDirectory
@@ -393,14 +396,14 @@ const BrowserZip = (function() {
                     ? fileRecord.content.size
                     : fileRecord.content.length);
               fileRecord.size = fileSize;
-    
+
               // Обчислення CRC32:
               // – Для Blob (файлів) – потокове обчислення через WorkerPool.
               // – Для директорій або інших типів – значення вже обчислено або 0.
               if (!fileRecord.isDirectory && (fileRecord.content instanceof Blob)) {
                 fileRecord.crc32 = await self.workerPool.runCRC32Stream(fileRecord.content, chunkSizeForCRC);
               }
-    
+
               // Створення локального заголовку
               const localHeader = self.createLocalFileHeader(
                 fileRecord.encodedName,
@@ -409,9 +412,10 @@ const BrowserZip = (function() {
               );
               controller.enqueue(localHeader);
               offset += localHeader.byteLength;
-    
-            // Для файлів з даними – потокове зчитування вмісту.
+
+              // Для файлів з даними – потокове зчитування вмісту.
               if (!fileRecord.isDirectory) {
+                let fileBytesProcessed = 0;
                 if (fileRecord.content instanceof Blob) {
                   const reader = fileRecord.content.stream().getReader();
                   while (true) {
@@ -420,37 +424,28 @@ const BrowserZip = (function() {
                     controller.enqueue(result.value);
                     offset += result.value.byteLength;
                     processedSize += result.value.byteLength;
-    
-                    // Оновлюємо прогрес
-                    if (onProgress) {
-                      const progress = Math.min(
-                        Math.round((processedSize / totalSize) * 100),
-                        100
-                      );
-                      onProgress(progress);
-                    }
+                    fileBytesProcessed += result.value.byteLength;
+
+                    // Оновлюємо прогрес з деталями
+                    updateProgress(processedSize, fileRecord, fileBytesProcessed, fileSize, onProgress);
                   }
                 } else {
                   controller.enqueue(fileRecord.content);
-                  offset += fileRecord.content.byteLength || fileRecord.content.length;
-                  processedSize += fileRecord.content.byteLength || fileRecord.content.length;
-    
-                  // Оновлюємо прогрес
-                  if (onProgress) {
-                    const progress = Math.min(
-                      Math.round((processedSize / totalSize) * 100),
-                      100
-                    );
-                    onProgress(progress);
-                  }
+                  const chunkLen = fileRecord.content.byteLength || fileRecord.content.length;
+                  offset += chunkLen;
+                  processedSize += chunkLen;
+                  fileBytesProcessed = chunkLen;
+
+                  // Оновлюємо прогрес з деталями
+                  updateProgress(processedSize, fileRecord, fileBytesProcessed, fileSize, onProgress);
                 }
               }
-    
+
               const localHeaderOffset = offset - (localHeader.byteLength + fileRecord.size);
               const centralHeader = self.createCentralDirectoryHeader(fileRecord, localHeaderOffset);
               centralDirectoryEntries.push(centralHeader);
             }
-    
+
             let centralDirSize = 0;
             for (const entry of centralDirectoryEntries) {
               controller.enqueue(entry);
@@ -458,19 +453,34 @@ const BrowserZip = (function() {
             }
             const centralDirOffset = offset;
             offset += centralDirSize;
-    
+
             const endRecords = self.createEndRecords(centralDirOffset, centralDirSize, fileRecords.length);
             for (const rec of endRecords) {
               controller.enqueue(rec);
             }
             offset += endRecords.reduce((sum, rec) => sum + rec.byteLength, 0);
-    
+
             // Очищення пам’яті: звільняємо записи
             self.files.clear();
             controller.close();
           } catch (error) {
             controller.error(new Error("Помилка генерації архіву: " + error));
           }
+
+          function updateProgress(processedSize, fileRecord, fileBytesProcessed, fileSize, onProgress) {
+            if (!onProgress) return;
+            const overallProgressPercent = Math.min(
+              Math.round((processedSize / totalSize) * 100),
+              100
+            );
+            onProgress({
+              filename: fileRecord.name,
+              fileBytesProcessed,
+              fileTotalBytes: fileSize,
+              overallProgressPercent
+            });
+          }
+          
         }
       });
       return stream;
@@ -480,12 +490,13 @@ const BrowserZip = (function() {
      * Завантажує ZIP‑архів.
      * Генерується архів через ReadableStream, створюється Blob, генерується URL,
      * а потім симулюється клік для завантаження.
-     * @param {string} fileName – Ім'я вихідного ZIP‑файлу.
-     * @param {number} [chunkSizeForCRC=65536] – Розмір чанку для обчислення CRC32.
-     * @param {function} [onProgress=null] – Функція зворотного виклику для оновлення прогресу
-     */
-    async downloadZip(fileName, chunkSizeForCRC = 65536, onProgress = null) {
-      const zipStream = this.generateZipStream(chunkSizeForCRC, onProgress);
+    * @param {string} fileName - Ім'я вихідного ZIP‑файлу (наприклад, "archive.zip").
+    * @param {object} [generationOptions] - Опції, що передаються в `generateZipStream`.
+    * @param {number} [generationOptions.chunkSizeForCRC=65536]
+    * @param {function} [generationOptions.onProgress=null]
+    */
+    async downloadZip(fileName, generationOptions = {}) {
+      const zipStream = this.generateZipStream(generationOptions);
       const response = new Response(zipStream);
       const zipBlob = await response.blob();
       const url = URL.createObjectURL(zipBlob);
