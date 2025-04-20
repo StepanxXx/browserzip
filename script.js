@@ -87,3 +87,33 @@ const appendAlert = (message, type) => {
 
 }
 */
+
+
+
+(async () => {
+  const zip = new BrowserZip();
+  const fileContent = new Blob(["Це великий файл для тестування CRC32 у воркері...".repeat(10000)]);
+  const smallText = "Простий текстовий файл.";
+
+  await zip.addFile("example.txt", smallText, { lastModified: new Date(2023, 10, 20, 10, 30, 0) });
+  await zip.addFolder("data/", { lastModified: new Date(2023, 10, 19) });
+  await zip.addFile("data/large_file.bin", fileContent); // Використає поточний час
+
+  console.log("Починаємо генерацію архіву...");
+
+  await zip.downloadZip("my_archive.zip", {
+    chunkSizeForCRC: 512 * 1024, // 512 KB чанк для CRC
+    onProgress: (progress) => {
+      console.log(`Прогрес: ${progress.overallProgressPercent}% ` +
+                  `(Файл: ${progress.filename || 'N/A'}, ${progress.fileBytesProcessed} / ${progress.fileTotalBytes} байт)`);
+    },
+    clearAfterGenerate: true // Очистити файли після генерації
+  });
+
+  console.log("Архів згенеровано та завантажено (або сталася помилка).");
+
+  // Перевірка, чи файли очищено
+  // console.log("Кількість файлів після генерації:", zip.files.size); // Має бути 0
+
+  zip.terminate(); // Завершуємо роботу воркерів
+})();

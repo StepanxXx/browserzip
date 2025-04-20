@@ -496,17 +496,34 @@ const BrowserZip = (function() {
     * @param {function} [generationOptions.onProgress=null]
     */
     async downloadZip(fileName, generationOptions = {}) {
-      const zipStream = this.generateZipStream(generationOptions);
-      const response = new Response(zipStream);
-      const zipBlob = await response.blob();
-      const url = URL.createObjectURL(zipBlob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = fileName;
-      link.click();
-      URL.revokeObjectURL(url);
+      try {
+        const zipStream = this.generateZipStream(generationOptions);
+        const response = new Response(zipStream, {
+          headers: { 'Content-Type': 'application/zip' }
+        });
+        const zipBlob = await response.blob();
+        const url = URL.createObjectURL(zipBlob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = fileName;
+        document.body.appendChild(link); // Додавання в DOM може бути потрібним для деяких браузерів
+        link.click();
+        document.body.removeChild(link); // Прибираємо за собою
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error(`Не вдалося завантажити ZIP "${fileName}":`, error);
+        // Повідомити користувача про помилку
+        alert(`Помилка завантаження архіву: ${error.message}`);
+        // Якщо потік був створений, але сталася помилка, спробувати його скасувати
+        if (zipStream && zipStream.locked === false) {
+            zipStream.cancel(error).catch(() => {}); // Ігноруємо помилку скасування
+        }
+        // Важливо: Не очищати this.files, якщо clearAfterGenerate=false і сталася помилка,
+        // щоб користувач міг спробувати знову.
+        // Якщо clearAfterGenerate=true, файли вже могли бути очищені в generateZipStream.
+      }
     }
-    
+
     /**
      * Завершує роботу бібліотеки та звільняє ресурси (воркери).
      */
