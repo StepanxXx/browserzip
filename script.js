@@ -39,21 +39,36 @@ zipButton.addEventListener("click", async () => {
 
   appendAlert('Архів створено та завантажено успішно!', 'success')
 });
-
+const delay = 50;
+let timer, prevTime;
 const updateProgress = ({ filename, overallProgressPercent, fileBytesProcessed, fileTotalBytes }) => {
   try {
+
+    if (timer) clearTimeout(timer);
+    if (prevTime && performance.now() - prevTime < delay) {
+      timer = setTimeout(
+        () => updateProgress({ filename, overallProgressPercent, fileBytesProcessed, fileTotalBytes })
+        , delay);
+      return;
+    }
+    prevTime = performance.now();
+
+    let label = "";
+    if (filename) {
+      label = ` | File: ${filename}`;
+      if (fileBytesProcessed && fileTotalBytes) {
+        label += ` (${((fileBytesProcessed / fileTotalBytes) * 100).toFixed(0)}%)`;
+      }
+    }
+
     if (!progressBar) return;
     progressBar.style.width = `${overallProgressPercent.toFixed(1)}%`;
     progressBar.setAttribute("aria-valuenow", overallProgressPercent.toFixed(1));
     progressBar.textContent = `${overallProgressPercent.toFixed(1)}%`;
-    if (!progressLabel) return;
-    if (filename) {
-      let label = ` | File: ${filename}`;
-      if (fileBytesProcessed && fileTotalBytes) {
-        label += ` (${((fileBytesProcessed / fileTotalBytes) * 100).toFixed(0)}%)`;
-      }
-      progressLabel.textContent = label;
-    }
+    console.log(overallProgressPercent + " %\t\t" + label);
+    
+    if (progressLabel) progressLabel.textContent = label;
+
   } catch (error) {
     console.error("Error updating progress:", error);
   }
